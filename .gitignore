@@ -1,3 +1,10 @@
+# Local settings (contains secrets)
 settings.json
+
+# Generated reports
 reports/
 *.csv
+
+# Python cache
+__pycache__/
+*.pyc
