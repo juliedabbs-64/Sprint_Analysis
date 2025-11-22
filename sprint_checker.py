@@ -3,8 +3,12 @@ import csv
 import requests
 import random
 import json
+import smtplib
+import ssl
 from datetime import datetime, timedelta
 from pathlib import Path
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 class SprintHealthChecker:
     def __init__(self):
@@ -24,10 +28,9 @@ class SprintHealthChecker:
         # Auth only for live mode
         self.auth = (self.jira_email, self.jira_token) if self.mode == "live" else None
 
-        # Alerts (NEW — this is all you needed)
+        # NEW: Multi-channel alert configuration
         self.alerts_enabled = self.config["alerts"]["enabled"]
-        self.alert_destination = self.config["alerts"]["destination"]
-        self.webhook_url = self.config["alerts"]["webhook_url"]
+        self.destinations = self.config["alerts"].get("destinations", {})
 
     def run_query(self, jql):
         if self.mode == "mock":
@@ -59,7 +62,6 @@ class SprintHealthChecker:
             }
 
         if "Blocked" in jql:
-            # Return BOTH critical issues
             return [
                 make("GK-124", "POS integration blocked by payment gateway timeout", "Blocked", "Alice Smith", "Highest", 1, 2),
                 make("GK-131", "Hotel booking API rate limited by external provider", "Blocked", "Bob Jones", "High", 0, 1),
@@ -110,43 +112,199 @@ class SprintHealthChecker:
 
         return csv_file
 
+    def _get_critical_issues(self, csv_file):
+        """Helper: Extract critical issues from CSV"""
+        try:
+            with open(csv_file, 'r') as f:
+                reader = csv.DictReader(f)
+                return [r for r in reader if r["Alert_Level"] == "CRITICAL"]
+        except FileNotFoundError:
+            print(f"❌ CSV file not found: {csv_file}")
+            return []
 
-# ============================================================
-# SLACK ALERT FUNCTION (unchanged EXCEPT: webhook comes from settings)
-# ============================================================
-def send_slack_alert(csv_file, webhook_url):
-    if not webhook_url:
-        print("⚠️ No webhook URL set, skipping alerts")
-        return
+    def send_alerts(self, csv_file):
+        """Route alerts to all enabled destinations"""
+        if not self.alerts_enabled:
+            print("⚠️ Alerts are disabled globally")
+            return
 
-    with open(csv_file, 'r') as f:
-        reader = csv.DictReader(f)
-        critical = [r for r in reader if r["Alert_Level"] == "CRITICAL"]
+        if not self.destinations:
+            print("⚠️ No alert destinations configured")
+            return
 
-    if not critical:
-        print("✅ No critical alerts to send")
-        return
+        critical_issues = self._get_critical_issues(csv_file)
+        
+        if not critical_issues:
+            print("✅ No critical alerts to send")
+            return
 
-    message = f"🔴 {len(critical)} Sprint Blockers Detected\n"
-    for issue in critical:
-        message += f"\n*Issue:* {issue['Issue_Key']}"
-        message += f"\n*Summary:* {issue['Summary']}"
-        message += f"\n*Assignee:* {issue['Assignee']}\n"
+        print(f"📊 Found {len(critical_issues)} critical issue(s), routing to enabled destinations...\n")
 
-    try:
-        payload = {"text": message}
+        for dest_type, config in self.destinations.items():
+            if not config.get("enabled", False):
+                continue
+
+            try:
+                if dest_type == "slack":
+                    self._send_slack_alert(critical_issues, config)
+                elif dest_type == "teams":
+                    self._send_teams_alert(critical_issues, config)
+                elif dest_type == "email":
+                    self._send_email_alert(critical_issues, config)
+                else:
+                    print(f"⚠️ Unknown destination type: '{dest_type}'")
+            except Exception as e:
+                print(f"❌ Alert failed for {dest_type}: {str(e)}")
+
+    def _send_slack_alert(self, issues, config):
+        """Send alert to Slack webhook"""
+        webhook_url = config.get("webhook_url")
+        if not webhook_url:
+            print("⚠️ Slack: No webhook URL configured")
+            return
+
+        message = f"🔴 {len(issues)} Sprint Blockers Detected\n"
+        for issue in issues:
+            message += f"\n*Issue:* {issue['Issue_Key']}"
+            message += f"\n*Summary:* {issue['Summary']}"
+            message += f"\n*Assignee:* {issue['Assignee']}\n"
+
+        response = requests.post(webhook_url, json={"text": message}, timeout=10)
+        response.raise_for_status()
+        print(f"📢 Slack alert sent: HTTP {response.status_code}")
+
+    def _send_teams_alert(self, issues, config):
+        """Send alert to Microsoft Teams webhook"""
+        webhook_url = config.get("webhook_url")
+        if not webhook_url:
+            print("⚠️ Teams: No webhook URL configured")
+            return
+
+        # Teams uses a slightly different payload format
+        message = f"🔴 **{len(issues)} Sprint Blockers Detected**<br><br>"
+        for issue in issues:
+            message += f"**Issue:** {issue['Issue_Key']}<br>"
+            message += f"**Summary:** {issue['Summary']}<br>"
+            message += f"**Assignee:** {issue['Assignee']}<br><br>"
+
+        payload = {
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "themeColor": "FF0000",
+            "summary": f"{len(issues)} Sprint Blockers",
+            "sections": [{
+                "activityTitle": "Sprint Health Alert",
+                "activitySubtitle": "Critical blockers require attention",
+                "text": message
+            }]
+        }
+
         response = requests.post(webhook_url, json=payload, timeout=10)
-        print(f"📢 Alert sent to Slack: {response.status_code}")
-    except Exception as e:
-        print(f"❌ Alert failed: {str(e)}")
+        response.raise_for_status()
+        print(f"📢 Teams alert sent: HTTP {response.status_code}")
 
+    def _send_email_alert(self, issues, config):
+        """Send alert via SMTP email"""
+        required_fields = ["smtp_server", "smtp_port", "username", "password", 
+                          "from_address", "to_addresses"]
+        
+        missing = [f for f in required_fields if not config.get(f)]
+        if missing:
+            print(f"⚠️ Email: Missing required fields: {', '.join(missing)}")
+            return
 
-# ============================================================
-# MAIN (only change is replacing the hard-coded webhook)
-# ============================================================
+        # Build email message
+        subject = f"{config.get('subject_prefix', '[SPRINT ALERT]')} {len(issues)} Critical Blocker(s) Detected"
+        
+        # Plain text body
+        body = f"""
+Sprint Health Alert
+===================
+
+🔴 {len(issues)} CRITICAL BLOCKER(S) DETECTED
+
+Details:
+--------
+"""
+        for issue in issues:
+            body += f"\nIssue: {issue['Issue_Key']}"
+            body += f"\nSummary: {issue['Summary']}"
+            body += f"\nAssignee: {issue['Assignee']}"
+            body += f"\nPriority: {issue['Priority']}"
+            body += f"\nLast Updated: {issue['Last_Updated']}\n"
+
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = config["from_address"]
+        msg['To'] = ', '.join(config["to_addresses"])
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+
+        # Send email
+        context = ssl.create_default_context()
+        with smtplib.SMTP(config["smtp_server"], config["smtp_port"]) as server:
+            server.starttls(context=context)
+            server.login(config["username"], config["password"])
+            server.send_message(msg)
+
+        to_list = ', '.join(config["to_addresses"])
+        print(f"📧 Email alert sent to: {to_list}")
+
+def analyse_csv(csv_file):
+    with open(csv_file, 'r') as f:
+        rows = list(csv.DictReader(f))
+
+    insights = []
+
+    # 1. BLOCKERS
+    blockers = [r for r in rows if r["Alert_Level"] == "CRITICAL"]
+    if blockers:
+        insights.append(f"🔴 There are {len(blockers)} active BLOCKERS. Sprint is at risk.")
+        for b in blockers:
+            insights.append(f"   • {b['Issue_Key']} ({b['Assignee']}) — {b['Summary']}")
+
+    # 2. STALLED
+    stalled = [r for r in rows if r["Alert_Level"] == "WARNING"]
+    if stalled:
+        insights.append(f"\n⚠️ {len(stalled)} items stalled (no progress for 2+ days):")
+        for s in stalled:
+            insights.append(f"   • {s['Issue_Key']} — {s['Assignee']} hasn't updated since {s['Last_Updated']}")
+
+    # 3. HIGH PRIORITY UNASSIGNED
+    unassigned = [r for r in rows if r["Alert_Level"] == "HIGH" and r["Assignee"] == "UNASSIGNED"]
+    if unassigned:
+        insights.append("\n❗ High priority items with NO ASSIGNEE:")
+        for u in unassigned:
+            insights.append(f"   • {u['Issue_Key']} — {u['Summary']} (needs assignment TODAY)")
+        insights.append("👉 Suggestion: Drop a low-priority item and assign this ASAP.")
+
+    # 4. WORKLOAD ANALYSIS
+    workload = {}
+    for r in rows:
+        person = r["Assignee"]
+        sp = int(r["Story_Points"]) if r["Story_Points"].isdigit() else 0
+        workload[person] = workload.get(person, 0) + sp
+
+    overloaded = [p for p, total in workload.items() if total >= 13 and p != "UNASSIGNED"]
+    if overloaded:
+        insights.append("\n📈 Potential overload:")
+        for p in overloaded:
+            insights.append(f"   • {p} has {workload[p]} story points.")
+
+    if not insights:
+        insights.append("✅ Sprint looks healthy. No major risks identified.")
+
+    return "\n".join(insights)
+
 if __name__ == "__main__":
     checker = SprintHealthChecker()
     csv_file = checker.generate_csv()
 
-    if checker.alerts_enabled and checker.alert_destination == "slack":
-        send_slack_alert(csv_file, checker.webhook_url)
+    # Daily AI Analysis
+    analysis = analyse_csv(csv_file)
+    print("\n📊 DAILY AI ANALYSIS:")
+    print(analysis)
+    print("\n" + "="*60 + "\n")
+
+    # Multi-channel alerting
+    checker.send_alerts(csv_file)
