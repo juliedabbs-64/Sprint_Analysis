@@ -1,8 +1,8 @@
 import os
 import csv
-import requests
-import random
 import json
+import random
+import requests
 import smtplib
 import ssl
 from datetime import datetime, timedelta
@@ -10,44 +10,52 @@ from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+# =========================================================
+#  SPRINT HEALTH CHECKER
+# =========================================================
+
 class SprintHealthChecker:
     def __init__(self):
-        # Load settings ONCE
         with open("settings.json", "r") as f:
             self.config = json.load(f)
 
-        # Mode
         self.mode = self.config["mode"]
-
-        # Jira settings
         self.jira_url = self.config["jira"]["url"]
         self.jira_email = self.config["jira"]["email"]
         self.jira_token = self.config["jira"]["token"]
         self.project_key = self.config["jira"]["project_key"]
 
-        # Auth only for live mode
+        # Auth (only used in LIVE mode)
         self.auth = (self.jira_email, self.jira_token) if self.mode == "live" else None
 
-        # NEW: Multi-channel alert configuration
+        # Alerts
         self.alerts_enabled = self.config["alerts"]["enabled"]
         self.destinations = self.config["alerts"].get("destinations", {})
 
+    # -----------------------------------------------------
+    # JIRA QUERY (LIVE OR MOCK)
+    # -----------------------------------------------------
     def run_query(self, jql):
         if self.mode == "mock":
             return self._mock_data(jql)
 
-        # LIVE: Real API call
         url = f"{self.jira_url}/rest/api/3/search"
-        params = {"jql": jql, "fields": "key,summary,status,assignee,priority,updated,issuelinks", "maxResults": 100}
-
+        params = {
+            "jql": jql,
+            "fields": "key,summary,status,assignee,priority,updated,issuelinks,customfield_10024",
+            "maxResults": 200
+        }
         response = requests.get(url, params=params, auth=self.auth, timeout=30)
         response.raise_for_status()
         return response.json()["issues"]
 
+    # -----------------------------------------------------
+    # MOCK MODE — NOW WITH DONE ITEMS
+    # -----------------------------------------------------
     def _mock_data(self, jql):
-        """GreeneKing mock data - single source of truth"""
         today = datetime.now()
-        def make(key, summary, status, assignee, priority, days_ago, blockers=0):
+
+        def make(key, summary, status, assignee, priority, days_ago, sp, blockers=0):
             return {
                 "key": key,
                 "fields": {
@@ -56,32 +64,65 @@ class SprintHealthChecker:
                     "assignee": {"displayName": assignee} if assignee else None,
                     "priority": {"name": priority},
                     "updated": (today - timedelta(days=days_ago)).isoformat(),
-                    "issuelinks": [{"type": {"outward": "blocks"}}] * blockers,
-                    "customfield_10024": random.choice([1, 2, 3, 5])
+                    "customfield_10024": sp,
+                    "issuelinks": [{"type": {"outward": "blocks"}}] * blockers
                 }
             }
 
+        # ===== DONE ITEMS =====
+        done_items = [
+            make("GK-101", "Migrate legacy reports to new BI platform",
+                 "Done", "Alice Smith", "Medium", 1, 5),
+
+            make("GK-109", "Fix table ordering crash on Android",
+                 "Done", "Bob Jones", "High", 2, 3),
+
+            make("GK-113", "Improve menu recommendation algorithm",
+                 "Done", "Diana Prince", "Medium", 3, 8)
+        ]
+
+        if "status = Done" in jql:
+            return done_items
+
+        # ===== BLOCKERS =====
         if "Blocked" in jql:
             return [
-                make("GK-124", "POS integration blocked by payment gateway timeout", "Blocked", "Alice Smith", "Highest", 1, 2),
-                make("GK-131", "Hotel booking API rate limited by external provider", "Blocked", "Bob Jones", "High", 0, 1),
-            ]
-        elif "updated <=" in jql:
-            return [
-                make("GK-115", "Update menu pricing across pub chain", "In Progress", "Charlie Brown", "Medium", 3),
-                make("GK-119", "Refactor customer loyalty points calculation", "In Progress", "Diana Prince", "Medium", 5),
-            ]
-        elif "assignee is EMPTY" in jql:
-            return [make("GK-130", "URGENT: Fix production bug in table ordering app", "To Do", None, "Highest", 0)]
-        return [make("GK-125", "Implement staff rostering feature", "In Progress", "Eve Adams", "High", 0)]
+                make("GK-124", "POS integration blocked by payment gateway timeout",
+                     "Blocked", "Alice Smith", "Highest", 2, 5, blockers=2),
 
+                make("GK-131", "Hotel booking API rate limited by external provider",
+                     "Blocked", "Bob Jones", "High", 1, 2, blockers=1)
+            ]
+
+        # ===== STALLED =====
+        if "updated <=" in jql:
+            return [
+                make("GK-115", "Update menu pricing across pub chain",
+                     "In Progress", "Charlie Brown", "Medium", 4, 3),
+
+                make("GK-119", "Refactor loyalty points calculation",
+                     "In Progress", "Diana Prince", "Medium", 6, 3)
+            ]
+
+        # ===== UNASSIGNED =====
+        if "assignee is EMPTY" in jql:
+            return [
+                make("GK-130", "URGENT: Fix production bug in table ordering app",
+                     "To Do", None, "Highest", 0, 3)
+            ]
+
+        return done_items
+
+    # -----------------------------------------------------
+    # CSV GENERATION (ADDS DONE ITEMS)
+    # -----------------------------------------------------
     def generate_csv(self):
-        """Generate the report"""
         Path("./reports").mkdir(exist_ok=True)
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         csv_file = f"./reports/{self.mode.upper()}_sprint_health_{timestamp}.csv"
 
-        with open(csv_file, 'w', newline='') as f:
+        with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "Query_Type", "Issue_Key", "Summary", "Status", "Assignee",
@@ -89,9 +130,10 @@ class SprintHealthChecker:
             ])
 
             queries = {
-                "blockers": f'project = {self.project_key} AND sprint in openSprints() AND (labels = "blocked" OR status = "Blocked")',
-                "stalled": f'project = {self.project_key} AND sprint in openSprints() AND status = "In Progress" AND updated <= -2d',
-                "unassigned": f'project = {self.project_key} AND sprint in openSprints() AND assignee is EMPTY AND priority = High'
+                "blockers": f'project = {self.project_key} AND status = "Blocked"',
+                "stalled": f'project = {self.project_key} AND status = "In Progress" AND updated <= -2d',
+                "unassigned": f'project = {self.project_key} AND assignee is EMPTY AND priority = High',
+                "done": f'project = {self.project_key} AND status = Done'
             }
 
             for name, jql in queries.items():
@@ -105,206 +147,135 @@ class SprintHealthChecker:
                         fields["status"]["name"],
                         fields["assignee"]["displayName"] if fields["assignee"] else "UNASSIGNED",
                         fields["priority"]["name"] if fields.get("priority") else "None",
-                        fields.get("customfield_10024", random.choice([2, 3, 5])),
+                        fields.get("customfield_10024", 3),
                         fields["updated"][:10],
-                        "CRITICAL" if name == "blockers" else "WARNING" if name == "stalled" else "HIGH"
+                        "CRITICAL" if name == "blockers"
+                        else "WARNING" if name == "stalled"
+                        else "HIGH" if name == "unassigned"
+                        else "DONE"
                     ])
 
         return csv_file
 
+    # -----------------------------------------------------
+    # Extract critical from CSV
+    # -----------------------------------------------------
     def _get_critical_issues(self, csv_file):
-        """Helper: Extract critical issues from CSV"""
         try:
-            with open(csv_file, 'r') as f:
-                reader = csv.DictReader(f)
-                return [r for r in reader if r["Alert_Level"] == "CRITICAL"]
+            with open(csv_file) as f:
+                return [r for r in csv.DictReader(f) if r["Alert_Level"] == "CRITICAL"]
         except FileNotFoundError:
-            print(f"❌ CSV file not found: {csv_file}")
             return []
 
+    # -----------------------------------------------------
+    # ALERT ROUTER
+    # -----------------------------------------------------
     def send_alerts(self, csv_file):
-        """Route alerts to all enabled destinations"""
-        if not self.alerts_enabled:
-            print("⚠️ Alerts are disabled globally")
+        critical = self._get_critical_issues(csv_file)
+
+        if not critical:
+            print("✅ No critical alerts to send.")
             return
 
-        if not self.destinations:
-            print("⚠️ No alert destinations configured")
-            return
+        print(f"📊 Sending alerts for {len(critical)} critical issues...\n")
 
-        critical_issues = self._get_critical_issues(csv_file)
-        
-        if not critical_issues:
-            print("✅ No critical alerts to send")
-            return
-
-        print(f"📊 Found {len(critical_issues)} critical issue(s), routing to enabled destinations...\n")
-
-        for dest_type, config in self.destinations.items():
-            if not config.get("enabled", False):
+        for dest_type, cfg in self.destinations.items():
+            if not cfg.get("enabled"):
                 continue
 
             try:
                 if dest_type == "slack":
-                    self._send_slack_alert(critical_issues, config)
-                elif dest_type == "teams":
-                    self._send_teams_alert(critical_issues, config)
+                    self._send_slack(critical, cfg)
                 elif dest_type == "email":
-                    self._send_email_alert(critical_issues, config)
-                else:
-                    print(f"⚠️ Unknown destination type: '{dest_type}'")
+                    self._send_email(critical, cfg)
             except Exception as e:
-                print(f"❌ Alert failed for {dest_type}: {str(e)}")
+                print(f"❌ Failed sending to {dest_type}: {e}")
 
-    def _send_slack_alert(self, issues, config):
-        """Send alert to Slack webhook"""
-        webhook_url = config.get("webhook_url")
-        if not webhook_url:
-            print("⚠️ Slack: No webhook URL configured")
-            return
+    def _send_slack(self, issues, cfg):
+        url = cfg["webhook_url"]
+        msg = f"🔴 {len(issues)} Sprint Blockers Detected\n"
+        for i in issues:
+            msg += f"• {i['Issue_Key']} — {i['Summary']} ({i['Assignee']})\n"
 
-        message = f"🔴 {len(issues)} Sprint Blockers Detected\n"
-        for issue in issues:
-            message += f"\n*Issue:* {issue['Issue_Key']}"
-            message += f"\n*Summary:* {issue['Summary']}"
-            message += f"\n*Assignee:* {issue['Assignee']}\n"
+        r = requests.post(url, json={"text": msg}, timeout=10)
+        r.raise_for_status()
+        print("📢 Slack alert sent ✔")
 
-        response = requests.post(webhook_url, json={"text": message}, timeout=10)
-        response.raise_for_status()
-        print(f"📢 Slack alert sent: HTTP {response.status_code}")
-
-    def _send_teams_alert(self, issues, config):
-        """Send alert to Microsoft Teams webhook"""
-        webhook_url = config.get("webhook_url")
-        if not webhook_url:
-            print("⚠️ Teams: No webhook URL configured")
-            return
-
-        # Teams uses a slightly different payload format
-        message = f"🔴 **{len(issues)} Sprint Blockers Detected**<br><br>"
-        for issue in issues:
-            message += f"**Issue:** {issue['Issue_Key']}<br>"
-            message += f"**Summary:** {issue['Summary']}<br>"
-            message += f"**Assignee:** {issue['Assignee']}<br><br>"
-
-        payload = {
-            "@type": "MessageCard",
-            "@context": "https://schema.org/extensions",
-            "themeColor": "FF0000",
-            "summary": f"{len(issues)} Sprint Blockers",
-            "sections": [{
-                "activityTitle": "Sprint Health Alert",
-                "activitySubtitle": "Critical blockers require attention",
-                "text": message
-            }]
-        }
-
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        response.raise_for_status()
-        print(f"📢 Teams alert sent: HTTP {response.status_code}")
-
-    def _send_email_alert(self, issues, config):
-        """Send alert via SMTP email"""
-        required_fields = ["smtp_server", "smtp_port", "username", "password", 
-                          "from_address", "to_addresses"]
-        
-        missing = [f for f in required_fields if not config.get(f)]
-        if missing:
-            print(f"⚠️ Email: Missing required fields: {', '.join(missing)}")
-            return
-
-        # Build email message
-        subject = f"{config.get('subject_prefix', '[SPRINT ALERT]')} {len(issues)} Critical Blocker(s) Detected"
-        
-        # Plain text body
-        body = f"""
-Sprint Health Alert
-===================
-
-🔴 {len(issues)} CRITICAL BLOCKER(S) DETECTED
-
-Details:
---------
-"""
-        for issue in issues:
-            body += f"\nIssue: {issue['Issue_Key']}"
-            body += f"\nSummary: {issue['Summary']}"
-            body += f"\nAssignee: {issue['Assignee']}"
-            body += f"\nPriority: {issue['Priority']}"
-            body += f"\nLast Updated: {issue['Last_Updated']}\n"
-
-        # Create message
+    def _send_email(self, issues, cfg):
         msg = MIMEMultipart()
-        msg['From'] = config["from_address"]
-        msg['To'] = ', '.join(config["to_addresses"])
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
+        msg["From"] = cfg["from_address"]
+        msg["To"] = ", ".join(cfg["to_addresses"])
+        msg["Subject"] = "[SPRINT ALERT] Critical blockers detected"
 
-        # Send email
-        context = ssl.create_default_context()
-        with smtplib.SMTP(config["smtp_server"], config["smtp_port"]) as server:
-            server.starttls(context=context)
-            server.login(config["username"], config["password"])
-            server.send_message(msg)
+        body = "CRITICAL BLOCKERS:\n\n"
+        for i in issues:
+            body += f"{i['Issue_Key']} — {i['Summary']} ({i['Assignee']})\n"
 
-        to_list = ', '.join(config["to_addresses"])
-        print(f"📧 Email alert sent to: {to_list}")
+        msg.attach(MIMEText(body, "plain"))
 
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP(cfg["smtp_server"], cfg["smtp_port"]) as s:
+            s.starttls(context=ctx)
+            s.login(cfg["username"], cfg["password"])
+            s.send_message(msg)
+
+        print("📧 Email alert sent ✔")
+
+
+# =========================================================
+# ANALYSIS FOR CONSOLE
+# =========================================================
 def analyse_csv(csv_file):
-    with open(csv_file, 'r') as f:
+    with open(csv_file) as f:
         rows = list(csv.DictReader(f))
 
     insights = []
 
-    # 1. BLOCKERS
     blockers = [r for r in rows if r["Alert_Level"] == "CRITICAL"]
-    if blockers:
-        insights.append(f"🔴 There are {len(blockers)} active BLOCKERS. Sprint is at risk.")
-        for b in blockers:
-            insights.append(f"   • {b['Issue_Key']} ({b['Assignee']}) — {b['Summary']}")
-
-    # 2. STALLED
     stalled = [r for r in rows if r["Alert_Level"] == "WARNING"]
+    unassigned = [r for r in rows if r["Alert_Level"] == "HIGH"]
+
+    if blockers:
+        insights.append(f"🔴 {len(blockers)} BLOCKERS:")
+        for b in blockers:
+            insights.append(f" • {b['Issue_Key']} — {b['Summary']} ({b['Assignee']})")
+
     if stalled:
-        insights.append(f"\n⚠️ {len(stalled)} items stalled (no progress for 2+ days):")
+        insights.append(f"\n⚠️ {len(stalled)} stalled items:")
         for s in stalled:
-            insights.append(f"   • {s['Issue_Key']} — {s['Assignee']} hasn't updated since {s['Last_Updated']}")
+            insights.append(f" • {s['Issue_Key']} — {s['Assignee']} (last updated {s['Last_Updated']})")
 
-    # 3. HIGH PRIORITY UNASSIGNED
-    unassigned = [r for r in rows if r["Alert_Level"] == "HIGH" and r["Assignee"] == "UNASSIGNED"]
     if unassigned:
-        insights.append("\n❗ High priority items with NO ASSIGNEE:")
+        insights.append("\n❗ Unassigned high priority:")
         for u in unassigned:
-            insights.append(f"   • {u['Issue_Key']} — {u['Summary']} (needs assignment TODAY)")
-        insights.append("👉 Suggestion: Drop a low-priority item and assign this ASAP.")
+            insights.append(f" • {u['Issue_Key']} — {u['Summary']}")
 
-    # 4. WORKLOAD ANALYSIS
-    workload = {}
-    for r in rows:
-        person = r["Assignee"]
-        sp = int(r["Story_Points"]) if r["Story_Points"].isdigit() else 0
-        workload[person] = workload.get(person, 0) + sp
-
-    overloaded = [p for p, total in workload.items() if total >= 13 and p != "UNASSIGNED"]
-    if overloaded:
-        insights.append("\n📈 Potential overload:")
-        for p in overloaded:
-            insights.append(f"   • {p} has {workload[p]} story points.")
-
-    if not insights:
-        insights.append("✅ Sprint looks healthy. No major risks identified.")
+    done = [r for r in rows if r["Alert_Level"] == "DONE"]
+    if done:
+        insights.append(f"\n✅ {len(done)} items completed this sprint")
 
     return "\n".join(insights)
 
+
+
+# =========================================================
+# MAIN
+# =========================================================
 if __name__ == "__main__":
+    from insights_service import run_insights
+    from dashboard import generate_dashboard
+
     checker = SprintHealthChecker()
     csv_file = checker.generate_csv()
 
-    # Daily AI Analysis
-    analysis = analyse_csv(csv_file)
-    print("\n📊 DAILY AI ANALYSIS:")
-    print(analysis)
+    print("\n📊 DAILY ANALYSIS:\n")
+    print(analyse_csv(csv_file))
     print("\n" + "="*60 + "\n")
 
-    # Multi-channel alerting
     checker.send_alerts(csv_file)
+
+    print("\n📡 Running Insights Service...")
+    run_insights(csv_file)
+
+    print("\n📊 Generating Dashboard...")
+    generate_dashboard(csv_file)

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Daily Standup Dashboard</title>
+
+    <!-- Correct Plotly Version -->
+    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f7f9fc;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1 {
+            background: #0a2342;
+            color: white;
+            padding: 15px;
+            border-radius: 6px;
+        }
+
+        h2 {
+            margin-top: 30px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            background: white;
+        }
+
+        th {
+            background: #0a2342;
+            padding: 8px;
+            color: white;
+            text-align: left;
+        }
+
+        td {
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        #chart-container {
+            margin-top: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Daily Standup Dashboard — {{ date }}</h1>
+
+<h2>Overall Sprint Health Score</h2>
+<p style="font-size: 22px; color: darkred;"><strong>{{ health_score }}/100</strong></p>
+
+<!-- BLOCKERS -->
+<h2>🔴 Critical Blockers</h2>
+<table>
+    <tr><th>Issue</th><th>Summary</th><th>Assignee</th><th>Priority</th></tr>
+    {% for row in blockers %}
+    <tr>
+        <td>{{ row.Issue_Key }}</td>
+        <td>{{ row.Summary }}</td>
+        <td>{{ row.Assignee }}</td>
+        <td>{{ row.Priority }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<!-- STALLED -->
+<h2>⚠️ Stalled Work (2+ days inactive)</h2>
+<table>
+    <tr><th>Issue</th><th>Summary</th><th>Assignee</th><th>Last Updated</th></tr>
+    {% for row in stalled %}
+    <tr>
+        <td>{{ row.Issue_Key }}</td>
+        <td>{{ row.Summary }}</td>
+        <td>{{ row.Assignee }}</td>
+        <td>{{ row.Last_Updated }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<!-- UNASSIGNED -->
+<h2>❗ Unassigned High Priority</h2>
+<table>
+    <tr><th>Issue</th><th>Summary</th><th>Priority</th><th>Updated</th></tr>
+    {% for row in unassigned %}
+    <tr>
+        <td>{{ row.Issue_Key }}</td>
+        <td>{{ row.Summary }}</td>
+        <td>{{ row.Priority }}</td>
+        <td>{{ row.Last_Updated }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<!-- DONE -->
+<h2>✅ Completed This Sprint</h2>
+<table>
+    <tr><th>Issue</th><th>Summary</th><th>Assignee</th><th>Story Points</th><th>Updated</th></tr>
+    {% for row in done %}
+    <tr>
+        <td>{{ row.Issue_Key }}</td>
+        <td>{{ row.Summary }}</td>
+        <td>{{ row.Assignee }}</td>
+        <td>{{ row.Story_Points }}</td>
+        <td>{{ row.Last_Updated }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<!-- STORY POINT CHART -->
+<h2>📊 Story Point Distribution</h2>
+<div id="chart-container">
+    {{ sp_chart | safe }}
+</div>
+
+</body>
+</html>

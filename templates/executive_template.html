@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Executive Sprint Summary</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&family=Playfair+Display:wght@600&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --heritage-green: #0A3A2A;
+            --heritage-green-light: #145540;
+            --gold: #C7A76C;
+            --sage: #6C8C7A;
+            --offwhite: #F8F5ED;
+            --slate: #1B1F1E;
+        }
+
+        body {
+            margin: 0;
+            background: var(--heritage-green);
+            font-family: 'Lato', sans-serif;
+            color: var(--offwhite);
+        }
+
+        .header {
+            background: var(--heritage-green-light);
+            padding: 40px 50px;
+            border-bottom: 4px solid var(--gold);
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 40px;
+            color: var(--gold);
+            font-family: 'Playfair Display', serif;
+        }
+
+        .content {
+            padding: 40px 50px;
+        }
+
+        /* KPI CARDS */
+        .kpi-container {
+            display: flex;
+            gap: 25px;
+            flex-wrap: wrap;
+            margin-top: 25px;
+        }
+
+        .kpi-card {
+            background: var(--slate);
+            padding: 25px;
+            border-radius: 14px;
+            flex: 1;
+            min-width: 220px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+            border-left: 5px solid var(--gold);
+        }
+
+        .section {
+            margin-top: 50px;
+            background: var(--slate);
+            padding: 30px;
+            border-radius: 14px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+            border-left: 5px solid var(--heritage-green-light);
+        }
+
+        .section h2 {
+            margin-top: 0;
+            font-size: 28px;
+            color: var(--gold);
+            font-family: "Playfair Display", serif;
+        }
+
+        /* GRID LAYOUT FOR CHARTS */
+        .chart-grid {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            flex-wrap: wrap;
+        }
+
+        .chart-box {
+            background: var(--slate);
+            padding: 20px;
+            border-radius: 14px;
+            width: 48%;
+            min-width: 400px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+            border-left: 4px solid var(--gold);
+        }
+
+        img.chart {
+            width: 100%;
+            border-radius: 8px;
+            border: 2px solid var(--gold);
+        }
+
+        table {
+            width: 100%;
+            font-size: 18px;
+            color: var(--offwhite);
+            margin-top: 15px;
+        }
+
+        th, td {
+            padding: 8px 0;
+        }
+
+    </style>
+</head>
+
+<body>
+
+    <div class="header">
+        <h1>Executive Sprint Summary</h1>
+        <p>Digital & Technology Delivery — Quarterly Programme Performance</p>
+    </div>
+
+    <div class="content">
+
+        <!-- KPI SECTION -->
+        <div class="section">
+            <h2>Key Performance Indicators</h2>
+            <div class="kpi-container">
+                <div class="kpi-card"><h3>Delivery %</h3><p>{{ kpis.delivery_pct }}%</p></div>
+                <div class="kpi-card"><h3>Committed SP</h3><p>{{ kpis.committed }}</p></div>
+                <div class="kpi-card"><h3>Completed SP</h3><p>{{ kpis.completed }}</p></div>
+                <div class="kpi-card"><h3>Carryover SP</h3><p>{{ kpis.carryover }}</p></div>
+            </div>
+        </div>
+
+        <!-- BURNDOWN FULL WIDTH -->
+        <div class="section">
+            <h2>Burndown (Actual vs Ideal)</h2>
+            <img class="chart" src="data:image/png;base64,{{ burndown_png }}" />
+        </div>
+
+        <!-- TWO-COLUMN GRID -->
+        <div class="chart-grid">
+            <div class="chart-box">
+                <h2>Velocity</h2>
+                <img class="chart" src="data:image/png;base64,{{ velocity_png }}" />
+            </div>
+
+            <div class="chart-box">
+                <h2>CFD (Story Points)</h2>
+                <img class="chart" src="data:image/png;base64,{{ cfd_png }}" />
+            </div>
+        </div>
+
+        <!-- CFD TABLE -->
+        <div class="section">
+            <h2>Flow Breakdown</h2>
+            <table>
+                <tr>
+                    <th>Status</th><th>Issues</th><th>Story Points</th>
+                </tr>
+                {% for row in cfd_table %}
+                <tr>
+                    <td>{{ row.status }}</td>
+                    <td>{{ row.count }}</td>
+                    <td>{{ row.points }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- RISKS -->
+        <div class="section">
+            <h2>Risks</h2>
+            <ul>
+                {% for r in kpis.risks %}
+                    <li>⚠️ {{ r }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <!-- RECOMMENDATIONS -->
+        <div class="section">
+            <h2>Recommendations</h2>
+            <ul>
+                {% for r in kpis.recs %}
+                    <li>✔️ {{ r }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+    </div>
+</body>
+</html>
