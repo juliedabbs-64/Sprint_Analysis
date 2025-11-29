@@ -7,14 +7,17 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # -------------------------------------------------------
-# LOAD SETTINGS
+# LOAD SETTINGS (profile-aware)
 # -------------------------------------------------------
 with open("settings.json", "r") as f:
     SETTINGS = json.load(f)
 
-EMAIL_CFG = SETTINGS["alerts"]["destinations"]["email"]
+# Determine active profile: mock or live
+mode = SETTINGS.get("mode", "mock")
+profile = SETTINGS["profiles"][mode]
 
-
+# Email config for selected profile
+EMAIL_CFG = profile["alerts"]["destinations"]["email"]
 # -------------------------------------------------------
 # LOAD CSV + STRUCTURE DATA
 # -------------------------------------------------------

@@ -1,10 +1,12 @@
 import os
 import csv
 import json
+import pandas as pd
 import random
 import requests
 import smtplib
 import ssl
+from jira_client import fetch_jira_dataframe
 from datetime import datetime, timedelta
 from pathlib import Path
 from email.mime.text import MIMEText
@@ -17,40 +19,76 @@ from email.mime.multipart import MIMEMultipart
 class SprintHealthChecker:
     def __init__(self):
         with open("settings.json", "r") as f:
-            self.config = json.load(f)
+            full_cfg = json.load(f)
 
-        self.mode = self.config["mode"]
-        self.jira_url = self.config["jira"]["url"]
-        self.jira_email = self.config["jira"]["email"]
-        self.jira_token = self.config["jira"]["token"]
-        self.project_key = self.config["jira"]["project_key"]
+        # Select profile
+        self.mode = full_cfg.get("mode", "mock")
+        self.config = full_cfg["profiles"][self.mode]
 
-        # Auth (only used in LIVE mode)
-        self.auth = (self.jira_email, self.jira_token) if self.mode == "live" else None
+        # Jira config
+        jira_cfg = self.config["jira"]
+        self.jira_url = jira_cfg["url"]
+        self.jira_email = jira_cfg["email"]
+        self.jira_token = jira_cfg["token"]
+        self.project_key = jira_cfg["project_key"]
+
+        # Auth only needed in live mode
+        self.auth = (self.jira_email, self.jira_token) if jira_cfg.get("enabled") else None
 
         # Alerts
-        self.alerts_enabled = self.config["alerts"]["enabled"]
-        self.destinations = self.config["alerts"].get("destinations", {})
+        alerts_cfg = self.config["alerts"]
+        self.alerts_enabled = alerts_cfg["enabled"]
+        self.destinations = alerts_cfg.get("destinations", {})
 
     # -----------------------------------------------------
     # JIRA QUERY (LIVE OR MOCK)
     # -----------------------------------------------------
     def run_query(self, jql):
+
+        # ================================
+        # MOCK MODE — unchanged
+        # ================================
         if self.mode == "mock":
             return self._mock_data(jql)
 
-        url = f"{self.jira_url}/rest/api/3/search"
-        params = {
-            "jql": jql,
-            "fields": "key,summary,status,assignee,priority,updated,issuelinks,customfield_10024",
-            "maxResults": 200
-        }
-        response = requests.get(url, params=params, auth=self.auth, timeout=30)
-        response.raise_for_status()
-        return response.json()["issues"]
+        # ================================
+        # LIVE MODE — Jira client + JQL filtering
+        # ================================
+        if self.config["jira"]["enabled"]:
+            df = fetch_jira_dataframe(self.config["jira"])
+            rows = df.to_dict(orient="records")
+
+            filtered = []
+
+            for r in rows:
+                status = r["Status"]
+                assignee = r["Assignee"]
+                updated = r["Last_Updated"]
+                priority = r["Priority"]
+
+                # BLOCKERS
+                if 'Blocked' in jql and status == 'Blocked':
+                    filtered.append(r)
+
+                # STALLED (In Progress)
+                elif 'status = "In Progress"' in jql and status == 'In Progress':
+                    filtered.append(r)
+
+                # UNASSIGNED HIGH PRIORITY
+                elif 'assignee is EMPTY' in jql and assignee == 'UNASSIGNED':
+                    filtered.append(r)
+
+                # DONE
+                elif 'status = Done' in jql and status == 'Done':
+                    filtered.append(r)
+
+            return filtered
+
+        # fallback
+        return []
 
     # -----------------------------------------------------
-    # MOCK MODE — NOW WITH DONE ITEMS
+    # MOCK MODE — REALISTIC ISSUES
     # -----------------------------------------------------
     def _mock_data(self, jql):
         today = datetime.now()
@@ -69,7 +107,7 @@ class SprintHealthChecker:
                 }
             }
 
-        # ===== DONE ITEMS =====
+        # DONE items
         done_items = [
             make("GK-101", "Migrate legacy reports to new BI platform",
                  "Done", "Alice Smith", "Medium", 1, 5),
@@ -84,7 +122,7 @@ class SprintHealthChecker:
         if "status = Done" in jql:
             return done_items
 
-        # ===== BLOCKERS =====
+        # BLOCKERS
         if "Blocked" in jql:
             return [
                 make("GK-124", "POS integration blocked by payment gateway timeout",
@@ -94,7 +132,7 @@ class SprintHealthChecker:
                      "Blocked", "Bob Jones", "High", 1, 2, blockers=1)
             ]
 
-        # ===== STALLED =====
+        # STALLED
         if "updated <=" in jql:
             return [
                 make("GK-115", "Update menu pricing across pub chain",
@@ -104,7 +142,7 @@ class SprintHealthChecker:
                      "In Progress", "Diana Prince", "Medium", 6, 3)
             ]
 
-        # ===== UNASSIGNED =====
+        # UNASSIGNED
         if "assignee is EMPTY" in jql:
             return [
                 make("GK-130", "URGENT: Fix production bug in table ordering app",
@@ -114,7 +152,7 @@ class SprintHealthChecker:
         return done_items
 
     # -----------------------------------------------------
-    # CSV GENERATION (ADDS DONE ITEMS)
+    # CSV GENERATION (MOCK & LIVE SAFE)
     # -----------------------------------------------------
     def generate_csv(self):
         Path("./reports").mkdir(exist_ok=True)
@@ -138,17 +176,37 @@ class SprintHealthChecker:
 
             for name, jql in queries.items():
                 issues = self.run_query(jql)
+
                 for issue in issues:
-                    fields = issue["fields"]
+
+                    # MOCK MODE
+                    if "fields" in issue:
+                        fields = issue["fields"]
+                        key = issue["key"]
+                        summary = fields["summary"][:60]
+                        status = fields["status"]["name"]
+                        assignee = fields["assignee"]["displayName"] if fields["assignee"] else "UNASSIGNED"
+                        priority = fields["priority"]["name"] if fields.get("priority") else "None"
+                        story_points = fields.get("customfield_10024", 3)
+                        updated = fields["updated"][:10]
+
+                    # LIVE MODE
+                    else:
+                        key = issue["Issue_Key"]
+                        summary = issue["Summary"][:60]
+                        status = issue["Status"]
+                        assignee = issue["Assignee"]
+                        priority = issue["Priority"]
+                        story_points = issue.get("Story_Points", 0)
+                        updated = (
+                            issue["Last_Updated"][:10]
+                            if isinstance(issue["Last_Updated"], str)
+                            else ""
+                        )
+
                     writer.writerow([
-                        name,
-                        issue["key"],
-                        fields["summary"][:60],
-                        fields["status"]["name"],
-                        fields["assignee"]["displayName"] if fields["assignee"] else "UNASSIGNED",
-                        fields["priority"]["name"] if fields.get("priority") else "None",
-                        fields.get("customfield_10024", 3),
-                        fields["updated"][:10],
+                        name, key, summary, status, assignee, priority,
+                        story_points, updated,
                         "CRITICAL" if name == "blockers"
                         else "WARNING" if name == "stalled"
                         else "HIGH" if name == "unassigned"
@@ -255,7 +313,6 @@ def analyse_csv(csv_file):
         insights.append(f"\n✅ {len(done)} items completed this sprint")
 
     return "\n".join(insights)
-
 
 
 # =========================================================
